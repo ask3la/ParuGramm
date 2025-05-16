@@ -1,0 +1,8 @@
+SUBD.pro
+databaseserver.cpp
+databaseserver.h
+databaseserver.ui
+main.cpp
+mainwindow.cpp
+mainwindow.h
+mainwindow.ui
