@@ -1,4 +1,4 @@
-QT       += core gui svg network widgets
+QT       += core gui svg network widgets sql
 CONFIG   += c++17
 
 SOURCES += \
@@ -7,6 +7,7 @@ SOURCES += \
     createroomdialog.cpp \
     emojipanel.cpp \
     joinroomdialog.cpp \
+    listroomsdialog.cpp \
     main.cpp \
     mainwindow.cpp
 
@@ -16,10 +17,10 @@ HEADERS += \
     createroomdialog.h \
     emojipanel.h \
     joinroomdialog.h \
+    listroomsdialog.h \
     mainwindow.h
 
-FORMS += \
-    mainwindow.ui
+FORMS +=
 
 RESOURCES += \
     resources.qrc

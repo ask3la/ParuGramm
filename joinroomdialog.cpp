@@ -133,3 +133,16 @@ void JoinRoomDialog::onJoinClicked() {
     });
     timer.start(10000);
 }
+
+void JoinRoomDialog::setRoomId(const QString& id) {
+    roomIdEdit->setText(id);
+    roomIdEdit->setEnabled(false); // Запрещаем редактирование, так как комната уже выбрана
+}
+
+void JoinRoomDialog::showPasswordField() {
+    passwordEdit->setVisible(true);
+}
+
+void JoinRoomDialog::hidePasswordField() {
+    passwordEdit->setVisible(false);
+}

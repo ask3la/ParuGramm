@@ -1,37 +1,59 @@
 #ifndef CHATWINDOW_H
 #define CHATWINDOW_H
 
+#include "client.h"
 #include <QWidget>
-#include <QTextEdit>
+#include <QTextBrowser>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QListWidget>
-#include "client.h"
-
-class EmojiPanel;
+#include <QLabel>
+#include <QMap>
 
 class ChatWindow : public QWidget {
     Q_OBJECT
 
 public:
     ChatWindow(int roomId, Client *client, QWidget *parent = nullptr);
-    ~ChatWindow() = default;
-
-private:
-    void setupConnections();
-    QTextEdit *chatArea;
-    QListWidget *userList;
-    QLineEdit *messageInput;
-    QPushButton *sendButton;
-    QPushButton *emojiButton;
-    QPushButton *fileButton;
-    int roomId;
-    Client *client;
 
 private slots:
     void sendMessage();
     void selectEmoji();
     void sendFile();
+    void handleFileSent(const QString& fileName, const QByteArray& fileData);
+    void handleAnchorClicked(const QUrl& url);
+
+    void onLeaveRoomClicked();
+    void handleUserJoined(int roomId, int userId);
+    void handleUserLeft(int roomId, int userId);
+    void handleLeftRoom();
+
+private:
+    void setupConnections();
+    void updateUserList(const QStringList& users);
+    QColor getUserColor(int userId) const;
+    QString getUserName(int userId) const;
+
+    int roomId;
+    Client *client;
+    QTextBrowser *chatArea;
+    QListWidget *userList;
+    QLabel *userListLabel;
+    QLineEdit *messageInput;
+    QPushButton *sendButton;
+    QPushButton *emojiButton;
+    QPushButton *fileButton;
+    QPushButton *leaveButton;
+    QLabel *logoLabel;
+    QLabel *titleLabel;
+    struct FileData {
+        QString fileName;
+        QByteArray data;
+    };
+    QMap<QString, FileData> fileDataMap;
+    int lastSenderId;
+    bool lastWasEvent;
+    QStringList lastUserList;
 };
 
 #endif // CHATWINDOW_H

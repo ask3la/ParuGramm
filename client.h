@@ -28,6 +28,11 @@ public:
     void sendFile(const std::string& filePath);
     void setRoomId(int id) { currentRoomId = id; }
     int getRoomId() const { return currentRoomId; }
+    int getClientId() const { return clientId; }
+
+    bool isConnected() const { return is_connected_; } // Добавляем этот метод
+
+    void leaveRoom();
 
 signals:
     void messageReceived(int roomId, int senderId, const QString& message);
@@ -35,7 +40,13 @@ signals:
     void joinedRoom();
     void roomListReceived(const QStringList& rooms);
     void errorReceived(const QString& error);
-    void fileReceived(const QString& fileName, const QByteArray& fileData);
+    void fileReceived(int roomId, int senderId, const QString& fileName, const QByteArray& fileData);
+    void fileSent(const QString& fileName, const QByteArray& fileData);
+    void fileSentConfirmed();
+    void usersReceived(const QStringList& users);
+    void userJoined(int roomId, int userId);
+    void userLeft(int roomId, int userId);
+    void leftRoom(); // <-- обязательно
 
 private:
     Client();
@@ -56,8 +67,9 @@ private:
     SOCKET socket_;
     std::mutex mutex_;
     std::thread receive_thread_;
-    int currentRoomId = -1;
-    int pendingRoomId = -1; // Для хранения roomId при JOIN_ROOM
+    int currentRoomId;
+    int pendingRoomId;
+    int clientId;
 };
 
 #endif // CLIENT_H

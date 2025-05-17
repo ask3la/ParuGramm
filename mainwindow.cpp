@@ -6,8 +6,11 @@
 #include <QVBoxLayout>
 #include <QPushButton>
 #include <QDebug>
+#include <QApplication>
 
 #include <QLabel>
+
+#include <listroomsdialog.h>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("ParuGramm");
@@ -32,6 +35,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     createRoomButton = new QPushButton("Создать комнату", this);
     joinRoomButton = new QPushButton("Присоединиться", this);
 
+    QPushButton *listRoomsButton = new QPushButton("Список комнат", this);
+
+
+
     layout->addSpacing(30);
     layout->addWidget(logoLabel);
     layout->addWidget(titleLabel);
@@ -39,17 +46,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     layout->addWidget(createRoomButton);
     layout->addSpacing(20); // Отступ перед кнопками
     layout->addWidget(joinRoomButton);
+    layout->addSpacing(20); // Отступ перед кнопками
+    layout->addWidget(listRoomsButton);
+
     layout->addStretch();
+
 
 
     connect(createRoomButton, &QPushButton::clicked, this, &MainWindow::onCreateRoomClicked);
     connect(joinRoomButton, &QPushButton::clicked, this, &MainWindow::onJoinRoomClicked);
+    connect(listRoomsButton, &QPushButton::clicked, this, &MainWindow::onListRoomsClicked);
 
     Client& client = Client::getInstance();
     connect(&client, &Client::roomCreated, this, &MainWindow::onRoomCreated);
     connect(&client, &Client::joinedRoom, this, &MainWindow::onJoinedRoom);
 
-    setFixedSize(600, 700);
+    setFixedSize(600, 750);
     setStyleSheet(R"(
         QWidget {
             background-color: #2C3E50;
@@ -103,8 +115,27 @@ void MainWindow::onJoinedRoom() {
     int roomId = client.getRoomId();
     qDebug() << "Joined room with ID:" << roomId;
     currentRoomId = roomId;
+
+    // Закрываем предыдущее окно чата, если оно есть
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        if (widget != this && widget->inherits("ChatWindow")) {
+            widget->close();
+            widget->deleteLater();
+        }
+    }
+
     ChatWindow *chatWindow = new ChatWindow(roomId, &client, nullptr);
     chatWindow->setAttribute(Qt::WA_DeleteOnClose);
     qDebug() << "ChatWindow created for room ID:" << roomId;
     this->hide();
+}
+
+void MainWindow::onListRoomsClicked() {
+    ListRoomsDialog *dialog = new ListRoomsDialog(this);
+    connect(dialog, &ListRoomsDialog::accepted, this, [this]() {
+        // После успешного входа в комнату
+        onJoinedRoom();
+    });
+    dialog->exec();
+    delete dialog;
 }

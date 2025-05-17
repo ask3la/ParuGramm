@@ -18,9 +18,14 @@ private slots:
     void onRoomCreated(int roomId);
     void onJoinedRoom();
 
+    void onListRoomsClicked();
+
 private:
     QPushButton *createRoomButton;
     QPushButton *joinRoomButton;
+
+    QPushButton *ListRoomsButton;
+
     Client& client = Client::getInstance();
     int currentRoomId = -1;
 };

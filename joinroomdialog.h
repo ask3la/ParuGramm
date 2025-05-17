@@ -10,6 +10,10 @@ class JoinRoomDialog : public QDialog {
 public:
     explicit JoinRoomDialog(QWidget *parent = nullptr);
 
+    void setRoomId(const QString& id);
+    void showPasswordField();
+    void hidePasswordField();
+
 private slots:
     void onJoinClicked();
 
