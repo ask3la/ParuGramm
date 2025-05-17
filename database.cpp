@@ -44,16 +44,10 @@ void Database::createTables() {
                    "room_id INTEGER, "
                    "sender_id INTEGER, "
                    "message TEXT, "
+                   "file_path TEXT, "
                    "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")) {
         qDebug() << "Created table 'messages'";
     } else {
         qDebug() << "Error creating table 'messages':" << query.lastError().text();
-    }
-
-    // Тестовая вставка для проверки
-    if (query.exec("INSERT INTO messages (room_id, sender_id, message) VALUES (1, 1, 'Первое сообщение')")) {
-        qDebug() << "Inserted test message";
-    } else {
-        qDebug() << "Error inserting test message:" << query.lastError().text();
     }
 }

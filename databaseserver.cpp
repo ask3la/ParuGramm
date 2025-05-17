@@ -6,6 +6,11 @@
 #include <QDataStream>
 #include <QVariant>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QDateTime>
+#include <QtGlobal>
+#include <QBuffer>
 
 DatabaseServer* DatabaseServer::p_instance = nullptr;
 SingletonDestroyer DatabaseServer::destroyer;
@@ -91,6 +96,9 @@ void DatabaseServer::handleConnections() {
         }
         std::lock_guard<std::mutex> lock(mutex_);
         clients_[nextClientId_] = clientSocket;
+        std::string response = "SUCCESS:Client ID:" + std::to_string(nextClientId_) + "\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        qDebug() << "Assigned client ID:" << nextClientId_ << "to socket";
         std::thread(&DatabaseServer::handleClient, this, clientSocket).detach();
         nextClientId_++;
     }
@@ -109,29 +117,48 @@ void DatabaseServer::handleClient(SOCKET clientSocket) {
     }
 
     std::string readBuffer;
-    char tempBuffer[4096];
+    char tempBuffer[65536];
     int bytesReceived;
     while ((bytesReceived = recv(clientSocket, tempBuffer, sizeof(tempBuffer), 0)) > 0) {
         readBuffer.append(tempBuffer, bytesReceived);
+        qDebug() << "Client" << clientId << "received" << bytesReceived << "bytes, buffer size:" << readBuffer.size();
 
-        // Проверяем, является ли это файлом
-        if (readBuffer.size() >= sizeof(int32_t)) {
-            int32_t magic;
-            memcpy(&magic, readBuffer.data(), sizeof(int32_t));
-            if (magic == static_cast<int32_t>(0xFA57F11E)) { // FILE_MAGIC
-                processFile(clientId, clientSocket, readBuffer);
-                continue;
+        while (!readBuffer.empty()) {
+            if (readBuffer.size() >= sizeof(uint32_t)) {
+                QDataStream ds(QByteArray::fromRawData(readBuffer.data(), readBuffer.size()));
+                ds.setVersion(QDataStream::Qt_5_15);
+                ds.setByteOrder(QDataStream::LittleEndian);
+                uint32_t magic;
+                ds >> magic;
+                if (magic == 0xFA57F11E) {
+                    qDebug() << "Detected file packet for client" << clientId;
+                    if (processFile(clientId, clientSocket, readBuffer)) {
+                        continue; // Файл обработан, продолжаем
+                    } else {
+                        break; // Ждём больше данных
+                    }
+                } else {
+                    qDebug() << "No file packet, magic:" << QString::number(magic, 16);
+                }
             }
-        }
 
-        // Обрабатываем текстовые сообщения
-        size_t newlinePos;
-        while ((newlinePos = readBuffer.find('\n')) != std::string::npos) {
+            size_t newlinePos = readBuffer.find('\n');
+            if (newlinePos == std::string::npos) {
+                if (readBuffer.size() > 10 * 1024 * 1024) { // Ограничение 10 МБ
+                    qDebug() << "Buffer too large without newline, clearing";
+                    readBuffer.clear();
+                    std::string response = "ERROR:Buffer overflow\r\n";
+                    send(clientSocket, response.c_str(), response.size(), 0);
+                }
+                break;
+            }
+
             std::string line = readBuffer.substr(0, newlinePos);
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
             if (!line.empty()) {
+                qDebug() << "Processing text command from client" << clientId << ":" << QString::fromStdString(line);
                 std::string response = processRequest(clientId, clientSocket, line) + "\r\n";
                 send(clientSocket, response.c_str(), response.size(), 0);
             }
@@ -144,12 +171,13 @@ void DatabaseServer::handleClient(SOCKET clientSocket) {
         clients_.erase(clientId);
         clientRooms_.erase(clientId);
     }
+    qDebug() << "Client" << clientId << "disconnected";
     shutdown(clientSocket, SD_BOTH);
     closesocket(clientSocket);
 }
 
 std::string DatabaseServer::processRequest(int clientId, SOCKET clientSocket, const std::string& request) {
-    // Убрали лишний qDebug
+    qDebug() << "Processing request from client" << clientId << ":" << QString::fromStdString(request);
     std::stringstream ss(request);
     std::string command;
     std::getline(ss, command, ':');
@@ -193,7 +221,7 @@ std::string DatabaseServer::processRequest(int clientId, SOCKET clientSocket, co
             return "ERROR:Invalid room ID";
         }
         QSqlQuery query(Database::instance().getDb());
-        query.prepare("SELECT sender_id, message FROM messages WHERE room_id = ? ORDER BY timestamp");
+        query.prepare("SELECT sender_id, message, file_path FROM messages WHERE room_id = ? ORDER BY timestamp");
         query.addBindValue(roomId);
         if (query.exec()) {
             std::string response = "MESSAGES:" + std::to_string(roomId) + ":";
@@ -202,14 +230,47 @@ std::string DatabaseServer::processRequest(int clientId, SOCKET clientSocket, co
                 if (!first) response += ";";
                 int senderId = query.value(0).toInt();
                 std::string message = query.value(1).toString().toStdString();
-                response += std::to_string(senderId) + "," + message;
+                std::string filePath = query.value(2).toString().toStdString();
+                response += std::to_string(senderId) + "," + (filePath.empty() ? message : "File: " + filePath);
                 first = false;
             }
             return response.empty() ? "MESSAGES:" + std::to_string(roomId) + ":None" : response;
         } else {
             return "ERROR:Failed to fetch messages:" + query.lastError().text().toStdString();
         }
-    } else {
+    } else if (command == "GET_USERS") {
+        std::string roomIdStr;
+        std::getline(ss, roomIdStr);
+        int roomId;
+        try {
+            roomId = std::stoi(roomIdStr);
+        } catch (...) {
+            return "ERROR:Invalid room ID";
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string response = "USER_LIST:";
+        bool first = true;
+        for (const auto& [id, socket] : clients_) {
+            if (clientRooms_.find(id) != clientRooms_.end() && clientRooms_[id] == roomId) {
+                if (!first) response += ";";
+                response += std::to_string(id);
+                first = false;
+            }
+        }
+        return response.empty() ? "USER_LIST:None" : response;
+    } else if (command == "LEAVE_ROOM") {
+        std::string roomIdStr;
+        std::getline(ss, roomIdStr);
+        int roomId;
+        try {
+            roomId = std::stoi(roomIdStr);
+        } catch (...) {
+            return "ERROR:Invalid room ID";
+        }
+        return handleLeaveRoom(clientId);
+    }
+    else {
+        qDebug() << "Unknown command from client" << clientId << ":" << QString::fromStdString(command);
         return "ERROR:Unknown command";
     }
 }
@@ -229,20 +290,52 @@ std::string DatabaseServer::handleCreateRoom(const std::string& name, const std:
 
 std::string DatabaseServer::handleJoinRoom(int clientId, int roomId, const std::string& password) {
     QSqlQuery query(Database::instance().getDb());
-    query.prepare("SELECT password FROM rooms WHERE id = :roomId");
-    query.bindValue(":roomId", QVariant(roomId));
+    query.prepare("SELECT id, name, password FROM rooms WHERE id = ?");
+    query.addBindValue(roomId);
+
     if (!query.exec() || !query.next()) {
         return "ERROR:Room not found";
     }
 
-    std::string storedPassword = query.value("password").toString().toStdString();
-    if (storedPassword.empty() || storedPassword == password) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        clientRooms_[clientId] = roomId;
-        return "SUCCESS:Joined room";
-    } else {
+    QString dbPassword = query.value("password").toString();
+    if (!dbPassword.isEmpty() && dbPassword != QString::fromStdString(password)) {
         return "ERROR:Invalid password";
     }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (clientRooms_.count(clientId)) {
+            int oldRoomId = clientRooms_[clientId];
+            clientRooms_.erase(clientId);
+            notifyUserLeft(oldRoomId, clientId);
+        }
+        clientRooms_[clientId] = roomId;
+    }
+
+    // Отправляем сначала подтверждение входа
+    std::string response = "SUCCESS:Joined room\r\n";
+    send(clients_[clientId], response.c_str(), response.size(), 0);
+
+    // Затем отправляем список пользователей
+    std::string userList;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool first = true;
+        for (const auto& [id, rId] : clientRooms_) {
+            if (rId == roomId) {
+                if (!first) userList += ";";
+                userList += std::to_string(id);
+                first = false;
+            }
+        }
+        if (first) userList = "None";
+    }
+
+    std::string userListResponse = "USER_LIST:" + userList + "\r\n";
+    send(clients_[clientId], userListResponse.c_str(), userListResponse.size(), 0);
+
+    notifyUserJoined(roomId, clientId);
+    return ""; // Мы уже отправили ответы вручную
 }
 
 std::string DatabaseServer::handleMessage(int clientId, int roomId, const std::string& message) {
@@ -258,22 +351,49 @@ std::string DatabaseServer::handleMessage(int clientId, int roomId, const std::s
     query.bindValue(":roomId", QVariant(roomId));
     query.bindValue(":senderId", QVariant(clientId));
     query.bindValue(":message", QVariant(QString::fromStdString(message)));
-    if (!query.exec()) {
+    if (query.exec()) {
+        broadcastMessage(roomId, clientId, message);
+        return "SUCCESS:Message sent";
+    } else {
         return "ERROR:Failed to save message:" + query.lastError().text().toStdString();
     }
-
-    broadcastMessage(roomId, clientId, message);
-    return "SUCCESS:Message sent";
 }
 
 std::string DatabaseServer::handleListRooms() {
     QSqlQuery query(Database::instance().getDb());
-    query.exec("SELECT id, name FROM rooms");
+    // Получаем список всех комнат с их названиями и наличием пароля
+    query.prepare("SELECT id, name, password FROM rooms");
+    if (!query.exec()) {
+        qDebug() << "Failed to fetch rooms:" << query.lastError().text();
+        return "ERROR:Failed to fetch room list";
+    }
+
+    // Собираем статистику по участникам в комнатах
+    std::map<int, int> userCounts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [clientId, roomId] : clientRooms_) {
+            userCounts[roomId]++;
+        }
+    }
+
     std::string result = "ROOM_LIST:";
     bool first = true;
     while (query.next()) {
         if (!first) result += ";";
-        result += query.value("id").toString().toStdString() + ":" + query.value("name").toString().toStdString();
+
+        int roomId = query.value("id").toInt();
+        QString name = query.value("name").toString();
+        QString password = query.value("password").toString();
+        int participants = userCounts[roomId];
+
+        result += QString("%1:%2:%3:%4")
+                      .arg(roomId)
+                      .arg(name)
+                      .arg(password.isEmpty() ? "No" : "Yes")
+                      .arg(participants)
+                      .toStdString();
+
         first = false;
     }
     return result.empty() ? "ROOM_LIST:None" : result;
@@ -289,19 +409,57 @@ void DatabaseServer::broadcastMessage(int roomId, int senderId, const std::strin
     }
 }
 
-void DatabaseServer::processFile(int clientId, SOCKET clientSocket, std::string& buffer) {
+bool DatabaseServer::processFile(int clientId, SOCKET clientSocket, std::string& buffer) {
+    if (buffer.size() < 3 * sizeof(int32_t)) {
+        qDebug() << "Not enough data for file header, need" << (3 * sizeof(int32_t)) << ", have" << buffer.size();
+        return false;
+    }
+
     QDataStream ds(QByteArray::fromRawData(buffer.data(), buffer.size()));
     ds.setVersion(QDataStream::Qt_5_15);
+    ds.setByteOrder(QDataStream::LittleEndian);
 
     int32_t magic, nameSize, dataSize;
     ds >> magic >> nameSize >> dataSize;
 
-    if (buffer.size() < static_cast<size_t>(sizeof(int32_t) * 3 + nameSize + dataSize)) {
-        return; // Ждем больше данных
+    if (magic != 0xFA57F11E) {
+        qDebug() << "Invalid magic number:" << QString::number(magic, 16);
+        buffer.clear();
+        std::string response = "ERROR:Invalid file packet\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return true;
     }
 
-    QByteArray nameData, fileData;
-    ds >> nameData >> fileData;
+    if (nameSize <= 0 || nameSize > 1024 || dataSize < 0 || dataSize > 10 * 1024 * 1024) {
+        qDebug() << "Invalid file packet: nameSize=" << nameSize << ", dataSize=" << dataSize;
+        buffer.clear();
+        std::string response = "ERROR:Invalid file packet\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return true;
+    }
+
+    size_t totalSize = sizeof(int32_t) * 3 + nameSize + dataSize;
+    if (buffer.size() < totalSize) {
+        qDebug() << "Incomplete file data for client" << clientId << ", need" << totalSize << ", have" << buffer.size();
+        return false; // Ждём больше данных
+    }
+
+    QByteArray nameData = QByteArray(buffer.data() + 12, nameSize);
+    QByteArray fileData = QByteArray(buffer.data() + 12 + nameSize, dataSize);
+    qDebug() << "nameData (hex):" << nameData.toHex();
+    qDebug() << "fileData size:" << fileData.size();
+
+    QString fileName = QString::fromUtf8(nameData);
+    qDebug() << "Parsed fileName:" << fileName;
+    if (fileName.isEmpty()) {
+        qDebug() << "Invalid file name (empty after UTF-8 conversion)";
+        buffer.erase(0, totalSize);
+        std::string response = "ERROR:Invalid file name\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return true;
+    }
+
+    qDebug() << "Processing file from client" << clientId << ":" << fileName << ", size:" << dataSize;
 
     int roomId = -1;
     {
@@ -312,18 +470,120 @@ void DatabaseServer::processFile(int clientId, SOCKET clientSocket, std::string&
     }
 
     if (roomId != -1) {
-        broadcastFile(roomId, clientId, buffer);
+        saveFile(roomId, clientId, fileName, fileData);
+        std::string fileBuffer = buffer.substr(0, totalSize);
+        broadcastFile(roomId, clientId, fileBuffer);
+        std::string response = "SUCCESS:File received\r\n";
+        qDebug() << "Sent response bytes:" << send(clientSocket, response.c_str(), response.size(), 0);
+    } else {
+        qDebug() << "Client" << clientId << "not in any room, ignoring file";
+        std::string response = "ERROR:Not in room\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
     }
 
-    // Удаляем обработанные данные
-    buffer.erase(0, sizeof(int32_t) * 3 + nameSize + dataSize);
+    buffer.erase(0, totalSize);
+    qDebug() << "File processed, remaining buffer size:" << buffer.size();
+    return true;
+}
+
+void DatabaseServer::saveFile(int roomId, int senderId, const QString& fileName, const QByteArray& fileData) {
+    QDir().mkpath("uploads");
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz");
+    QString uniqueFileName = QString("uploads/%1_%2_%3").arg(senderId).arg(timestamp).arg(fileName);
+
+    QFile file(uniqueFileName);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(fileData);
+        file.close();
+        qDebug() << "File saved:" << uniqueFileName;
+
+        QSqlQuery query(Database::instance().getDb());
+        query.prepare("INSERT INTO messages (room_id, sender_id, message, file_path) "
+                      "VALUES (:roomId, :senderId, :message, :filePath)");
+        query.bindValue(":roomId", roomId);
+        query.bindValue(":senderId", senderId);
+        query.bindValue(":message", QString("File: %1").arg(fileName));
+        query.bindValue(":filePath", uniqueFileName);
+        if (!query.exec()) {
+            qDebug() << "Error saving file metadata:" << query.lastError().text();
+        } else {
+            qDebug() << "File metadata saved for" << fileName;
+        }
+    } else {
+        qDebug() << "Failed to save file:" << uniqueFileName;
+    }
 }
 
 void DatabaseServer::broadcastFile(int roomId, int senderId, const std::string& buffer) {
+    QBuffer newBuffer;
+    newBuffer.open(QIODevice::WriteOnly);
+    QDataStream ds(&newBuffer);
+    ds.setVersion(QDataStream::Qt_5_15);
+    ds.setByteOrder(QDataStream::LittleEndian);
+
+    QByteArray originalData = QByteArray::fromRawData(buffer.data(), buffer.size());
+    QDataStream origDs(originalData);
+    origDs.setVersion(QDataStream::Qt_5_15);
+    origDs.setByteOrder(QDataStream::LittleEndian);
+
+    int32_t magic, nameSize, dataSize;
+    origDs >> magic >> nameSize >> dataSize;
+
+    ds << magic << senderId << nameSize << dataSize;
+    newBuffer.write(originalData.mid(12));
+
+    QByteArray packet = newBuffer.data();
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [id, socket] : clients_) {
-        if (clientRooms_.find(id) != clientRooms_.end() && clientRooms_[id] == roomId) {
-            send(socket, buffer.data(), buffer.size(), 0);
+        if (clientRooms_.find(id) != clientRooms_.end() && clientRooms_[id] == roomId && id != senderId) {
+            int totalSent = 0;
+            while (totalSent < packet.size()) {
+                int sent = send(socket, packet.data() + totalSent, packet.size() - totalSent, 0);
+                if (sent == SOCKET_ERROR) {
+                    qDebug() << "Broadcast file failed for client" << id << "with error:" << WSAGetLastError();
+                    break;
+                }
+                totalSent += sent;
+            }
+            qDebug() << "Broadcasted file to client" << id << "from sender" << senderId << ", sent:" << totalSent;
         }
     }
 }
+
+std::string DatabaseServer::handleLeaveRoom(int clientId) {
+    int roomId = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (clientRooms_.count(clientId)) {
+            roomId = clientRooms_[clientId];
+            clientRooms_.erase(clientId);
+        }
+    }
+
+    if (roomId != -1) {
+        notifyUserLeft(roomId, clientId);
+        return "SUCCESS:Left room";
+    }
+    return "ERROR:Not in any room";
+}
+
+void DatabaseServer::notifyUserJoined(int roomId, int userId) {
+    std::string response = "USER_JOINED:" + std::to_string(roomId) + ":" + std::to_string(userId) + "\r\n";
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, socket] : clients_) {
+        if (clientRooms_.find(id) != clientRooms_.end() && clientRooms_[id] == roomId) {
+            send(socket, response.c_str(), response.size(), 0);
+        }
+    }
+}
+
+void DatabaseServer::notifyUserLeft(int roomId, int userId) {
+    std::string response = "USER_LEFT:" + std::to_string(roomId) + ":" + std::to_string(userId) + "\r\n";
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, socket] : clients_) {
+        if (clientRooms_.find(id) != clientRooms_.end() && clientRooms_[id] == roomId) {
+            send(socket, response.c_str(), response.size(), 0);
+        }
+    }
+}
+
